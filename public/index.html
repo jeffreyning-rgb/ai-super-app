@@ -35,13 +35,42 @@
   .step { display: flex; gap: 8px; font-size: 13px; padding: 3px 0; color: #c6ccda; }
   .step.done span { text-decoration: line-through; color: #7c8496; }
   .empty { font-size: 13px; color: #626a7d; padding: 4px 2px; }
+  .headRight { display: flex; align-items: center; gap: 12px; }
+  #userChip { font-size: 13px; color: #c6ccda; }
+  #authView { display: none; flex: 1; align-items: center; justify-content: center; padding: 20px; }
+  body.locked #authView { display: flex; }
+  body.locked header, body.locked main { display: none; }
+  .authCard { width: 320px; max-width: 92vw; background: #171a21; border: 1px solid #232733; border-radius: 14px; padding: 24px; display: flex; flex-direction: column; gap: 12px; }
+  .authCard h1 { font-size: 20px; }
+  .authCard p { font-size: 13px; color: #9aa3b5; }
+  .authCard input { background: #0f1115; border: 1px solid #2b303d; border-radius: 10px; color: #e8eaf0; padding: 11px 14px; font-size: 15px; }
+  .authBtns { display: flex; gap: 8px; }
+  .authBtns #authMain { flex: 1; }
+  .authErr { font-size: 13px; color: #ff7a7a; min-height: 18px; }
   @media (max-width: 760px) { main { flex-direction: column; } #chat { border-right: none; flex: 1.2; } aside { flex: 1; } }
 </style>
 </head>
-<body>
+<body class="locked">
+<div id="authView">
+  <div class="authCard">
+    <h1>AI 超级应用</h1>
+    <p id="authTitle">登录后继续</p>
+    <input id="authUser" placeholder="用户名" autocomplete="username">
+    <input id="authPass" type="password" placeholder="密码（至少 6 位）" autocomplete="current-password">
+    <div class="authBtns">
+      <button id="authMain">登录</button>
+      <button id="authToggle" class="ghost">没有账号？去注册</button>
+    </div>
+    <div class="authErr" id="authErr"></div>
+  </div>
+</div>
 <header>
   <h1>AI 超级应用</h1>
-  <div class="stats" id="stats"></div>
+  <div class="headRight">
+    <div class="stats" id="stats"></div>
+    <span id="userChip"></span>
+    <button id="logout" class="ghost">退出</button>
+  </div>
 </header>
 <main>
   <div id="chat">
@@ -108,6 +137,7 @@ async function api(action, body) {
     body: body ? JSON.stringify(body) : undefined,
   });
   const data = await res.json();
+  if (res.status === 401 && data && data.needLogin) { document.body.classList.add("locked"); }
   if (data && data.messages) { state = data; render(); }
   return data;
 }
@@ -119,6 +149,7 @@ function render() {
     `<div class="empty">还没有对话，跟我说点什么吧。</div>`;
   $("messages").scrollTop = $("messages").scrollHeight;
   $("stats").textContent = `待办未完成 ${state.stats.todoOpen ?? 0} · 支出合计 ${state.stats.expenseTotal ?? 0} 元 · 记忆 ${state.stats.memoryCount ?? 0} 条 · 进行中任务 ${state.stats.taskOpen ?? 0}`;
+  if (state.user) $("userChip").textContent = state.user.username;
   $("todos").innerHTML = state.todos.map((t) =>
     `<div class="row ${t.done ? "done" : ""}"><input type="checkbox" ${t.done ? "checked" : ""} onchange="toggleTodo(${t.id}, this.checked)"><span class="grow">${esc(t.title)}</span><button class="del" onclick="delTodo(${t.id})">删</button></div>`).join("") ||
     `<div class="empty">暂无待办</div>`;
@@ -199,9 +230,42 @@ $("setSave").onclick = async () => {
   showSettings(s);
   $("setStatus").textContent = s.has_key ? `已保存，key 尾号 …${s.key_tail}` : "已保存（还没填 key）";
 };
-api("getsettings").then(showSettings);
-
-api("getbootstrap");
+let authMode = "login";
+function setLocked(v) { document.body.classList.toggle("locked", v); }
+$("authToggle").onclick = () => {
+  authMode = authMode === "login" ? "register" : "login";
+  $("authMain").textContent = authMode === "login" ? "登录" : "注册";
+  $("authToggle").textContent = authMode === "login" ? "没有账号？去注册" : "已有账号？去登录";
+  $("authTitle").textContent = authMode === "login" ? "登录后继续" : "注册一个新账号";
+  $("authErr").textContent = "";
+};
+async function afterLogin() {
+  await api("getbootstrap");
+  api("getsettings").then(showSettings);
+}
+$("authMain").onclick = async () => {
+  const username = $("authUser").value.trim(), password = $("authPass").value;
+  if (!username || !password) { $("authErr").textContent = "用户名和密码都要填"; return; }
+  $("authErr").textContent = "";
+  const data = await api(authMode === "login" ? "login" : "register", { username, password });
+  if (data.error) { $("authErr").textContent = data.error; return; }
+  if (data.user) state.user = data.user;
+  $("authPass").value = "";
+  setLocked(false);
+  afterLogin();
+};
+$("authPass").addEventListener("keydown", (e) => { if (e.key === "Enter") $("authMain").onclick(); });
+$("logout").onclick = async () => {
+  await api("logout", {});
+  state = { messages: [], todos: [], expenses: [], memories: [], tasks: [], stats: {} };
+  render();
+  setLocked(true);
+};
+(async () => {
+  const me = await api("me");
+  if (me.user) { state.user = me.user; setLocked(false); afterLogin(); }
+  else setLocked(true);
+})();
 </script>
 </body>
 </html>

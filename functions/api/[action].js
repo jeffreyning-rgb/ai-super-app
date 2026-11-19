@@ -1,24 +1,77 @@
-// AI 超级应用 · Pages Functions API（与 Muse 版 MVP 相同的动作名）
-// 数据存 Cloudflare D1（binding: DB）
-const json = (obj, status = 200) =>
+// AI 超级应用 · Pages Functions API
+// 数据存 Cloudflare D1（binding: DB）；带用户注册/登录，数据按用户隔离
+const json = (obj, status = 200, extraHeaders = {}) =>
   new Response(JSON.stringify(obj), {
     status,
-    headers: { "content-type": "application/json; charset=utf-8" },
+    headers: { "content-type": "application/json; charset=utf-8", ...extraHeaders },
   });
 
-async function bootstrap(db) {
+// ---------- 密码与会话 ----------
+const enc = new TextEncoder();
+function b64(bytes) {
+  let s = "";
+  for (const b of bytes) s += String.fromCharCode(b);
+  return btoa(s);
+}
+function unb64(str) {
+  return Uint8Array.from(atob(str), (c) => c.charCodeAt(0));
+}
+async function sha256hex(text) {
+  const buf = await crypto.subtle.digest("SHA-256", enc.encode(text));
+  return [...new Uint8Array(buf)].map((b) => b.toString(16).padStart(2, "0")).join("");
+}
+async function hashPassword(password) {
+  const salt = crypto.getRandomValues(new Uint8Array(16));
+  const key = await crypto.subtle.importKey("raw", enc.encode(password), "PBKDF2", false, ["deriveBits"]);
+  const bits = await crypto.subtle.deriveBits({ name: "PBKDF2", salt, iterations: 60000, hash: "SHA-256" }, key, 256);
+  return `pbkdf2$60000$${b64(salt)}$${b64(new Uint8Array(bits))}`;
+}
+async function verifyPassword(password, stored) {
+  try {
+    const [, iter, saltB64, hashB64] = stored.split("$");
+    const key = await crypto.subtle.importKey("raw", enc.encode(password), "PBKDF2", false, ["deriveBits"]);
+    const bits = await crypto.subtle.deriveBits({ name: "PBKDF2", salt: unb64(saltB64), iterations: parseInt(iter, 10), hash: "SHA-256" }, key, 256);
+    const got = b64(new Uint8Array(bits));
+    if (got.length !== hashB64.length) return false;
+    let diff = 0;
+    for (let i = 0; i < got.length; i++) diff |= got.charCodeAt(i) ^ hashB64.charCodeAt(i);
+    return diff === 0;
+  } catch {
+    return false;
+  }
+}
+async function createSession(db, userId) {
+  const token = [...crypto.getRandomValues(new Uint8Array(32))].map((b) => b.toString(16).padStart(2, "0")).join("");
+  const tokenHash = await sha256hex(token);
+  await db.prepare("INSERT INTO sessions (token_hash, user_id, expires_at) VALUES (?, ?, datetime('now', '+30 days'))").bind(tokenHash, userId).run();
+  return token;
+}
+function sessionCookie(token, clear = false) {
+  return `session=${clear ? "" : token}; HttpOnly; Secure; SameSite=Lax; Path=/; Max-Age=${clear ? 0 : 2592000}`;
+}
+async function getAuthUser(db, request) {
+  const cookie = request.headers.get("cookie") || "";
+  const m = cookie.match(/(?:^|;\s*)session=([0-9a-f]{64})/);
+  if (!m) return null;
+  const tokenHash = await sha256hex(m[1]);
+  const row = await db
+    .prepare("SELECT u.id, u.username FROM sessions s JOIN users u ON u.id = s.user_id WHERE s.token_hash = ? AND s.expires_at > datetime('now')")
+    .bind(tokenHash)
+    .first();
+  return row ? { id: row.id, username: row.username, tokenHash } : null;
+}
+
+// ---------- 业务数据（全部按 user_id 隔离） ----------
+async function bootstrap(db, uid) {
   const [messages, todos, expenses, memories, tasks, steps] = await Promise.all([
-    db.prepare("SELECT id, role, content, created_at FROM messages ORDER BY id ASC LIMIT 200").all(),
-    db.prepare("SELECT id, title, done, created_at FROM todos ORDER BY id DESC").all(),
-    db.prepare("SELECT id, item, amount, created_at FROM expenses ORDER BY id DESC").all(),
-    db.prepare("SELECT id, key, value, updated_at FROM memories ORDER BY id DESC").all(),
-    db.prepare("SELECT id, title, status, created_at FROM tasks ORDER BY id DESC").all(),
-    db.prepare("SELECT id, task_id, title, done, position FROM task_steps ORDER BY position ASC, id ASC").all(),
+    db.prepare("SELECT id, role, content, created_at FROM messages WHERE user_id = ? ORDER BY id ASC LIMIT 200").bind(uid).all(),
+    db.prepare("SELECT id, title, done, created_at FROM todos WHERE user_id = ? ORDER BY id DESC").bind(uid).all(),
+    db.prepare("SELECT id, item, amount, created_at FROM expenses WHERE user_id = ? ORDER BY id DESC").bind(uid).all(),
+    db.prepare("SELECT id, key, value, updated_at FROM memories WHERE user_id = ? ORDER BY id DESC").bind(uid).all(),
+    db.prepare("SELECT id, title, status, created_at FROM tasks WHERE user_id = ? ORDER BY id DESC").bind(uid).all(),
+    db.prepare("SELECT s.id, s.task_id, s.title, s.done, s.position FROM task_steps s JOIN tasks t ON t.id = s.task_id WHERE t.user_id = ? ORDER BY s.position ASC, s.id ASC").bind(uid).all(),
   ]);
-  const taskList = tasks.results.map((t) => ({
-    ...t,
-    steps: steps.results.filter((s) => s.task_id === t.id),
-  }));
+  const taskList = tasks.results.map((t) => ({ ...t, steps: steps.results.filter((s) => s.task_id === t.id) }));
   const expenseTotal = expenses.results.reduce((s, e) => s + (e.amount || 0), 0);
   return {
     messages: messages.results,
@@ -35,8 +88,8 @@ async function bootstrap(db) {
   };
 }
 
-async function getSettings(db) {
-  const rows = await db.prepare("SELECT key, value FROM settings").all();
+async function getSettings(db, uid) {
+  const rows = await db.prepare("SELECT key, value FROM settings WHERE user_id = ?").bind(uid).all();
   const s = {};
   for (const r of rows.results) s[r.key] = r.value;
   return {
@@ -47,18 +100,17 @@ async function getSettings(db) {
     api_key: s.api_key || "",
   };
 }
-
-async function setSetting(db, key, value) {
+async function setSetting(db, uid, key, value) {
   await db
-    .prepare("INSERT INTO settings (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = datetime('now')")
-    .bind(key, value)
+    .prepare("INSERT INTO settings (user_id, key, value) VALUES (?, ?, ?) ON CONFLICT(user_id, key) DO UPDATE SET value = excluded.value, updated_at = datetime('now')")
+    .bind(uid, key, value)
     .run();
 }
+function settingsView(s) {
+  return { provider: s.provider, base_url: s.base_url, model: s.model, protocol: s.protocol, has_key: !!s.api_key, key_tail: s.api_key ? s.api_key.slice(-4) : "" };
+}
 
-// 大模型调用：三种协议
-// openai    —— OpenAI 兼容接口（DeepSeek / OpenAI / 通义 / 智谱 / Kimi / 硅基流动 / OpenRouter 等）
-// anthropic —— Claude 原生接口
-// gemini    —— Google Gemini 原生接口
+// ---------- 大模型调用：三种协议 ----------
 function mergeTurns(history) {
   const out = [];
   for (const m of history) {
@@ -69,7 +121,6 @@ function mergeTurns(history) {
   while (out.length && out[0].role !== "user") out.shift();
   return out;
 }
-
 async function fetchJSON(url, options) {
   const ctrl = new AbortController();
   const timer = setTimeout(() => ctrl.abort(), 30000);
@@ -82,11 +133,10 @@ async function fetchJSON(url, options) {
     clearTimeout(timer);
   }
 }
-
-async function callLLM(db, settings) {
-  const hist = await db.prepare("SELECT role, content FROM messages ORDER BY id DESC LIMIT 12").all();
+async function callLLM(db, uid, settings) {
+  const hist = await db.prepare("SELECT role, content FROM messages WHERE user_id = ? ORDER BY id DESC LIMIT 12").bind(uid).all();
   const history = hist.results.reverse().map((m) => ({ role: m.role, content: m.content }));
-  const data = await bootstrap(db);
+  const data = await bootstrap(db, uid);
   const memText = data.memories.map((mm) => `${mm.key}：${mm.value}`).join("；") || "无";
   const todoText = data.todos.filter((t) => !t.done).map((t) => t.title).join("；") || "无";
   const system =
@@ -126,24 +176,23 @@ async function callLLM(db, settings) {
   return String(text).trim();
 }
 
-// 规则版意图识别：记账 / 待办 / 记忆 / 任务，其余走大模型（未配置时给提示）
-async function handleChat(db, content) {
+// ---------- 对话：规则意图 + 大模型 ----------
+async function handleChat(db, uid, content) {
   const text = (content || "").trim();
-  await db.prepare("INSERT INTO messages (role, content) VALUES ('user', ?)").bind(text).run();
+  await db.prepare("INSERT INTO messages (user_id, role, content) VALUES (?, 'user', ?)").bind(uid, text).run();
   let reply = null;
 
   let m = text.match(/(?:花了|花费|支出|买.+?花?了?)\s*(\d+(?:\.\d+)?)\s*元?/);
   if (!m) m = text.match(/^(.+?)\s*(\d+(?:\.\d+)?)\s*元$/);
   if (m && /花|买|支出|元/.test(text)) {
     const item = (text.replace(/\d+(?:\.\d+)?\s*元?/, "").replace(/^(记账|记录|我)?(花了|买了)?/, "").trim()) || "支出";
-    const amount = parseFloat(m[1] !== undefined && /\d/.test(m[1]) && m.length > 2 ? m[2] || m[1] : m[1]);
     const amt = parseFloat(m[2] || m[1]);
-    await db.prepare("INSERT INTO expenses (item, amount) VALUES (?, ?)").bind(item.slice(0, 40), amt).run();
+    await db.prepare("INSERT INTO expenses (user_id, item, amount) VALUES (?, ?, ?)").bind(uid, item.slice(0, 40), amt).run();
     reply = `记好了：${item.slice(0, 40)} ${amt} 元，已存进账本。`;
   } else if (/^(待办|提醒我|记得|记一下|添加待办)[:：]?\s*/.test(text) || /待办/.test(text.slice(0, 4))) {
     const title = text.replace(/^(待办|提醒我|记得|记一下|添加待办)[:：]?\s*/, "").replace(/待办[:：]?/, "").trim();
     if (title) {
-      await db.prepare("INSERT INTO todos (title) VALUES (?)").bind(title).run();
+      await db.prepare("INSERT INTO todos (user_id, title) VALUES (?, ?)").bind(uid, title).run();
       reply = `已加到待办：${title}`;
     }
   } else if (/^记住[:：]?\s*/.test(text) || /帮我记住/.test(text)) {
@@ -152,14 +201,14 @@ async function handleChat(db, content) {
     const key = (kv[0] || "备注").trim().slice(0, 30) || "备注";
     const value = (kv.slice(1).join("：") || body).trim();
     await db
-      .prepare("INSERT INTO memories (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = datetime('now')")
-      .bind(key, value)
+      .prepare("INSERT INTO memories (user_id, key, value) VALUES (?, ?, ?) ON CONFLICT(user_id, key) DO UPDATE SET value = excluded.value, updated_at = datetime('now')")
+      .bind(uid, key, value)
       .run();
     reply = `记住了：${key} — ${value}`;
   } else if (/^(任务|计划)[:：]?\s*/.test(text)) {
     const title = text.replace(/^(任务|计划)[:：]?\s*/, "").trim();
     if (title) {
-      const r = await db.prepare("INSERT INTO tasks (title) VALUES (?)").bind(title).run();
+      const r = await db.prepare("INSERT INTO tasks (user_id, title) VALUES (?, ?)").bind(uid, title).run();
       const steps = ["明确目标和完成标准", "拆解所需材料和步骤", "排出时间表并开始第一步", "检查结果并收尾"];
       for (let i = 0; i < steps.length; i++) {
         await db.prepare("INSERT INTO task_steps (task_id, title, position) VALUES (?, ?, ?)").bind(r.meta.last_row_id, steps[i], i).run();
@@ -168,10 +217,10 @@ async function handleChat(db, content) {
     }
   }
   if (!reply) {
-    const settings = await getSettings(db);
+    const settings = await getSettings(db, uid);
     if (settings.api_key) {
       try {
-        reply = await callLLM(db, settings);
+        reply = await callLLM(db, uid, settings);
       } catch (e) {
         reply = `大模型调用失败：${String(e && e.message || e)}。检查一下模型设置里的 key 和模型名，或者稍后再试。`;
       }
@@ -179,8 +228,15 @@ async function handleChat(db, content) {
       reply = "收到。记账、加待办、让我记住某件事、建任务，都可以直接跟我说。想跟我聊天问答，先在上方「模型设置」里填一个大模型 API key（推荐 DeepSeek）。";
     }
   }
-  await db.prepare("INSERT INTO messages (role, content) VALUES ('assistant', ?)").bind(reply).run();
+  await db.prepare("INSERT INTO messages (user_id, role, content) VALUES (?, 'assistant', ?)").bind(uid, reply).run();
   return reply;
+}
+
+async function saveMemory(db, uid, key, value) {
+  await db
+    .prepare("INSERT INTO memories (user_id, key, value) VALUES (?, ?, ?) ON CONFLICT(user_id, key) DO UPDATE SET value = excluded.value, updated_at = datetime('now')")
+    .bind(uid, key, value)
+    .run();
 }
 
 export async function onRequest(context) {
@@ -193,74 +249,110 @@ export async function onRequest(context) {
     try { body = await request.json(); } catch { body = {}; }
   }
   try {
-    switch (action) {
-      case "getbootstrap":
-        return json(await bootstrap(db));
-      case "getsettings": {
-        const s = await getSettings(db);
-        return json({ provider: s.provider, base_url: s.base_url, model: s.model, protocol: s.protocol, has_key: !!s.api_key, key_tail: s.api_key ? s.api_key.slice(-4) : "" });
+    // 公开动作：注册 / 登录
+    if (action === "register") {
+      const username = String(body.username || "").trim();
+      const password = String(body.password || "");
+      if (username.length < 2 || username.length > 30 || /\s/.test(username)) return json({ error: "用户名需 2–30 个字符且不能有空格" }, 400);
+      if (password.length < 6) return json({ error: "密码至少 6 位" }, 400);
+      const lower = username.toLowerCase();
+      const exists = await db.prepare("SELECT id FROM users WHERE username_lower = ?").bind(lower).first();
+      if (exists) return json({ error: "这个用户名已被注册" }, 409);
+      const count = await db.prepare("SELECT COUNT(*) AS c FROM users").first();
+      const hash = await hashPassword(password);
+      const r = await db.prepare("INSERT INTO users (username, username_lower, password_hash) VALUES (?, ?, ?)").bind(username, lower, hash).run();
+      const uid = r.meta.last_row_id;
+      if (count.c === 0) {
+        // 第一个注册的账号继承此前无主的历史数据
+        for (const t of ["messages", "todos", "expenses", "memories", "tasks", "settings"]) {
+          await db.prepare(`UPDATE ${t} SET user_id = ? WHERE user_id = 0`).bind(uid).run();
+        }
       }
+      const token = await createSession(db, uid);
+      return json({ ok: true, user: { id: uid, username } }, 200, { "set-cookie": sessionCookie(token) });
+    }
+    if (action === "login") {
+      const lower = String(body.username || "").trim().toLowerCase();
+      const password = String(body.password || "");
+      const user = await db.prepare("SELECT id, username, password_hash FROM users WHERE username_lower = ?").bind(lower).first();
+      if (!user || !(await verifyPassword(password, user.password_hash))) return json({ error: "用户名或密码不对" }, 401);
+      const token = await createSession(db, user.id);
+      return json({ ok: true, user: { id: user.id, username: user.username } }, 200, { "set-cookie": sessionCookie(token) });
+    }
+
+    // 其余动作都要登录
+    const auth = await getAuthUser(db, request);
+    if (!auth) return json({ error: "unauthorized", needLogin: true }, 401);
+    const uid = auth.id;
+    const boot = async () => ({ user: { id: auth.id, username: auth.username }, ...(await bootstrap(db, uid)) });
+
+    switch (action) {
+      case "me":
+        return json({ user: { id: auth.id, username: auth.username } });
+      case "logout":
+        await db.prepare("DELETE FROM sessions WHERE token_hash = ?").bind(auth.tokenHash).run();
+        return json({ ok: true }, 200, { "set-cookie": sessionCookie("", true) });
+      case "getbootstrap":
+        return json(await boot());
+      case "getsettings":
+        return json(settingsView(await getSettings(db, uid)));
       case "savesettings": {
-        if (body.provider !== undefined) await setSetting(db, "provider", String(body.provider).slice(0, 30));
-        if (body.base_url !== undefined) await setSetting(db, "base_url", String(body.base_url).trim().slice(0, 200));
-        if (body.model !== undefined) await setSetting(db, "model", String(body.model).trim().slice(0, 60));
-        if (body.protocol !== undefined) await setSetting(db, "protocol", String(body.protocol).slice(0, 20));
-        if (body.api_key) await setSetting(db, "api_key", String(body.api_key).trim());
-        const s = await getSettings(db);
-        return json({ ok: true, provider: s.provider, base_url: s.base_url, model: s.model, protocol: s.protocol, has_key: !!s.api_key, key_tail: s.api_key ? s.api_key.slice(-4) : "" });
+        if (body.provider !== undefined) await setSetting(db, uid, "provider", String(body.provider).slice(0, 30));
+        if (body.base_url !== undefined) await setSetting(db, uid, "base_url", String(body.base_url).trim().slice(0, 200));
+        if (body.model !== undefined) await setSetting(db, uid, "model", String(body.model).trim().slice(0, 60));
+        if (body.protocol !== undefined) await setSetting(db, uid, "protocol", String(body.protocol).slice(0, 20));
+        if (body.api_key) await setSetting(db, uid, "api_key", String(body.api_key).trim());
+        return json({ ok: true, ...settingsView(await getSettings(db, uid)) });
       }
       case "sendmessage": {
-        const reply = await handleChat(db, body.content || "");
-        return json({ reply, ...(await bootstrap(db)) });
+        const reply = await handleChat(db, uid, body.content || "");
+        return json({ reply, ...(await boot()) });
       }
       case "clearchat":
-        await db.prepare("DELETE FROM messages").run();
-        return json(await bootstrap(db));
+        await db.prepare("DELETE FROM messages WHERE user_id = ?").bind(uid).run();
+        return json(await boot());
       case "addtodo":
-        await db.prepare("INSERT INTO todos (title) VALUES (?)").bind((body.title || "").trim()).run();
-        return json(await bootstrap(db));
+        await db.prepare("INSERT INTO todos (user_id, title) VALUES (?, ?)").bind(uid, (body.title || "").trim()).run();
+        return json(await boot());
       case "toggletodo":
-        await db.prepare("UPDATE todos SET done = ? WHERE id = ?").bind(body.done ? 1 : 0, body.id).run();
-        return json(await bootstrap(db));
+        await db.prepare("UPDATE todos SET done = ? WHERE id = ? AND user_id = ?").bind(body.done ? 1 : 0, body.id, uid).run();
+        return json(await boot());
       case "deletetodo":
-        await db.prepare("DELETE FROM todos WHERE id = ?").bind(body.id).run();
-        return json(await bootstrap(db));
+        await db.prepare("DELETE FROM todos WHERE id = ? AND user_id = ?").bind(body.id, uid).run();
+        return json(await boot());
       case "addexpense":
-        await db.prepare("INSERT INTO expenses (item, amount) VALUES (?, ?)").bind((body.item || "").trim(), parseFloat(body.amount) || 0).run();
-        return json(await bootstrap(db));
+        await db.prepare("INSERT INTO expenses (user_id, item, amount) VALUES (?, ?, ?)").bind(uid, (body.item || "").trim(), parseFloat(body.amount) || 0).run();
+        return json(await boot());
       case "deleteexpense":
-        await db.prepare("DELETE FROM expenses WHERE id = ?").bind(body.id).run();
-        return json(await bootstrap(db));
+        await db.prepare("DELETE FROM expenses WHERE id = ? AND user_id = ?").bind(body.id, uid).run();
+        return json(await boot());
       case "savememory":
-        await db
-          .prepare("INSERT INTO memories (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = datetime('now')")
-          .bind((body.key || "").trim(), (body.value || "").trim())
-          .run();
-        return json(await bootstrap(db));
+        await saveMemory(db, uid, (body.key || "").trim(), (body.value || "").trim());
+        return json(await boot());
       case "deletememory":
-        await db.prepare("DELETE FROM memories WHERE id = ?").bind(body.id).run();
-        return json(await bootstrap(db));
+        await db.prepare("DELETE FROM memories WHERE id = ? AND user_id = ?").bind(body.id, uid).run();
+        return json(await boot());
       case "createtask": {
-        const r = await db.prepare("INSERT INTO tasks (title) VALUES (?)").bind((body.title || "").trim()).run();
+        const r = await db.prepare("INSERT INTO tasks (user_id, title) VALUES (?, ?)").bind(uid, (body.title || "").trim()).run();
         const steps = Array.isArray(body.steps) && body.steps.length ? body.steps : ["明确目标和完成标准", "拆解所需材料和步骤", "排出时间表并开始第一步", "检查结果并收尾"];
         for (let i = 0; i < steps.length; i++) {
           await db.prepare("INSERT INTO task_steps (task_id, title, position) VALUES (?, ?, ?)").bind(r.meta.last_row_id, String(steps[i]), i).run();
         }
-        return json(await bootstrap(db));
+        return json(await boot());
       }
       case "toggletaskstep": {
-        await db.prepare("UPDATE task_steps SET done = ? WHERE id = ?").bind(body.done ? 1 : 0, body.id).run();
-        const t = await db.prepare("SELECT task_id FROM task_steps WHERE id = ?").bind(body.id).first();
+        const t = await db.prepare("SELECT s.task_id FROM task_steps s JOIN tasks tk ON tk.id = s.task_id WHERE s.id = ? AND tk.user_id = ?").bind(body.id, uid).first();
         if (t) {
+          await db.prepare("UPDATE task_steps SET done = ? WHERE id = ?").bind(body.done ? 1 : 0, body.id).run();
           const left = await db.prepare("SELECT COUNT(*) AS c FROM task_steps WHERE task_id = ? AND done = 0").bind(t.task_id).first();
           await db.prepare("UPDATE tasks SET status = ? WHERE id = ?").bind(left.c === 0 ? "done" : "open", t.task_id).run();
         }
-        return json(await bootstrap(db));
+        return json(await boot());
       }
       case "deletetask":
-        await db.prepare("DELETE FROM task_steps WHERE task_id = ?").bind(body.id).run();
-        await db.prepare("DELETE FROM tasks WHERE id = ?").bind(body.id).run();
-        return json(await bootstrap(db));
+        await db.prepare("DELETE FROM task_steps WHERE task_id IN (SELECT id FROM tasks WHERE id = ? AND user_id = ?)").bind(body.id, uid).run();
+        await db.prepare("DELETE FROM tasks WHERE id = ? AND user_id = ?").bind(body.id, uid).run();
+        return json(await boot());
       default:
         return json({ error: `未知动作 ${action}` }, 404);
     }

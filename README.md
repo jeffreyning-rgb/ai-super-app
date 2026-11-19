@@ -1,10 +1,12 @@
 # AI 超级应用（AI Super App）
 
-一个跑在 Cloudflare 免费套餐上的个人 AI 助手网页应用：对话里直接记账、加待办、存长期记忆、建多步任务，还可以接自己的大模型 API key 做自由聊天问答。数据存 Cloudflare D1，打开链接就是云端数据，刷新不丢。
+一个跑在 Cloudflare 免费套餐上的个人 AI 助手网页应用：对话里直接记账、加待办、存长期记忆、建多步任务，还可以接自己的大模型 API key 做自由聊天问答。带用户注册/登录，数据存 Cloudflare D1 并按用户隔离，刷新不丢。
 
-在线演示：https://ai-super-app.jeffreyning.workers.dev/ （演示数据公开可见，请勿填入隐私信息）
+在线演示：https://ai-super-app.jeffreyning.workers.dev/ （需注册账号使用，演示站请勿填入隐私信息）
 
 ## 功能
+
+- 用户注册/登录：用户名 + 密码（PBKDF2 加盐哈希存储），会话 cookie 30 天；每个账号的对话、待办、账本、记忆、任务和模型设置互相隔离。第一个注册的账号会继承部署前已有的无主数据
 
 - 对话助手：规则识别四类指令并直接执行
   - 记账：「午餐花了32元」→ 存进账本
@@ -50,15 +52,17 @@ node build-worker.mjs   # 生成 worker.js（页面内嵌 + 接口合并）
 
 ## 注意
 
-- 本应用没有登录系统：谁拿到链接，谁就能看到和修改同一份数据。自用没问题，不要把链接公开传播；演示站同理。
-- API key 明文存在 D1 的 settings 表里。介意的话可以改用 Worker Secret 注入，自行调整 `getSettings` 的读取方式。
+- 登录只做基础防护：密码 PBKDF2 哈希、会话令牌只存哈希、cookie 为 HttpOnly。没有找回密码、没有验证码，公网部署时请用强密码，并清楚任何拿到你密码的人都能看到你的数据。
+- API key 明文存在 D1 的 settings 表里（按用户隔离）。介意的话可以改用 Worker Secret 注入，自行调整 `getSettings` 的读取方式。
+- 老版本升级：先在 D1 执行一次 `migration-auth.sql`，再部署新代码。
 
 ## 结构
 
 ```text
-public/index.html        前端页面（原生 HTML/CSS/JS）
-functions/api/[action].js  接口：对话、待办、账本、记忆、任务、模型设置
-schema.sql               D1 建表脚本（7 张表）
+public/index.html        前端页面（原生 HTML/CSS/JS，含登录界面）
+functions/api/[action].js  接口：注册/登录、对话、待办、账本、记忆、任务、模型设置
+schema.sql               D1 建表脚本（9 张表，全新安装用）
+migration-auth.sql       老库升级到带登录版本的迁移脚本
 wrangler.toml            Pages 与 D1 绑定配置
 build-worker.mjs         把页面和接口打包成单个 Worker 的脚本
 ```
