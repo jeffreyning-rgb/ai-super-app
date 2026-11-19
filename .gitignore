@@ -1,0 +1,4 @@
+worker.js
+metadata.json
+.wrangler/
+node_modules/

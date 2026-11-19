@@ -1,0 +1,184 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>AI 超级应用</title>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { font-family: -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif; background: #0f1115; color: #e8eaf0; height: 100vh; display: flex; flex-direction: column; }
+  header { padding: 14px 20px; border-bottom: 1px solid #232733; display: flex; justify-content: space-between; align-items: center; }
+  header h1 { font-size: 18px; }
+  header .stats { font-size: 13px; color: #9aa3b5; }
+  main { flex: 1; display: flex; min-height: 0; }
+  #chat { flex: 1.4; display: flex; flex-direction: column; border-right: 1px solid #232733; }
+  #messages { flex: 1; overflow-y: auto; padding: 16px 20px; display: flex; flex-direction: column; gap: 10px; }
+  .msg { max-width: 82%; padding: 10px 14px; border-radius: 14px; line-height: 1.55; font-size: 15px; white-space: pre-wrap; word-break: break-word; }
+  .msg.user { align-self: flex-end; background: #2f6fed; color: #fff; }
+  .msg.assistant { align-self: flex-start; background: #1c202a; }
+  #composer { display: flex; gap: 8px; padding: 12px 16px; border-top: 1px solid #232733; }
+  #composer input { flex: 1; background: #171a21; border: 1px solid #2b303d; border-radius: 10px; color: #e8eaf0; padding: 11px 14px; font-size: 15px; }
+  button { background: #2f6fed; color: #fff; border: none; border-radius: 10px; padding: 10px 16px; font-size: 14px; cursor: pointer; }
+  button.ghost { background: #232733; color: #c6ccda; }
+  aside { flex: 1; overflow-y: auto; padding: 16px; display: flex; flex-direction: column; gap: 18px; }
+  section h2 { font-size: 14px; color: #9aa3b5; margin-bottom: 8px; letter-spacing: .05em; }
+  .row { display: flex; align-items: center; gap: 8px; padding: 7px 10px; background: #171a21; border-radius: 9px; margin-bottom: 6px; font-size: 14px; }
+  .row .grow { flex: 1; }
+  .row .del { color: #ff7a7a; cursor: pointer; background: none; padding: 2px 6px; }
+  .row.done .grow { text-decoration: line-through; color: #7c8496; }
+  .mini { display: flex; gap: 6px; margin-bottom: 8px; }
+  .mini input { flex: 1; background: #171a21; border: 1px solid #2b303d; border-radius: 8px; color: #e8eaf0; padding: 8px 10px; font-size: 14px; }
+  .mini input.narrow { flex: 0 0 84px; }
+  .mini select { flex: 1; background: #171a21; border: 1px solid #2b303d; border-radius: 8px; color: #e8eaf0; padding: 8px 10px; font-size: 14px; }
+  .task { background: #171a21; border-radius: 9px; padding: 10px; margin-bottom: 8px; }
+  .task h3 { font-size: 14px; margin-bottom: 6px; display: flex; justify-content: space-between; }
+  .step { display: flex; gap: 8px; font-size: 13px; padding: 3px 0; color: #c6ccda; }
+  .step.done span { text-decoration: line-through; color: #7c8496; }
+  .empty { font-size: 13px; color: #626a7d; padding: 4px 2px; }
+  @media (max-width: 760px) { main { flex-direction: column; } #chat { border-right: none; flex: 1.2; } aside { flex: 1; } }
+</style>
+</head>
+<body>
+<header>
+  <h1>AI 超级应用</h1>
+  <div class="stats" id="stats"></div>
+</header>
+<main>
+  <div id="chat">
+    <div id="messages"></div>
+    <div id="composer">
+      <input id="input" placeholder="跟我说：买菜花了35元 / 待办：交水电费 / 记住：…… / 任务：……" autocomplete="off">
+      <button id="send">发送</button>
+      <button id="clear" class="ghost">清空对话</button>
+    </div>
+  </div>
+  <aside>
+    <section>
+      <h2>模型设置</h2>
+      <div class="mini">
+        <select id="setProvider">
+          <option value="deepseek">DeepSeek</option>
+          <option value="openai">OpenAI</option>
+          <option value="custom">自定义（OpenAI 兼容）</option>
+        </select>
+      </div>
+      <div class="mini"><input id="setBase" placeholder="接口地址，如 https://api.deepseek.com"></div>
+      <div class="mini"><input id="setModel" placeholder="模型名，如 deepseek-chat"></div>
+      <div class="mini"><input id="setKey" type="password" placeholder="API key（留空表示不修改）" autocomplete="off"></div>
+      <div class="mini"><button id="setSave">保存设置</button><span id="setStatus" class="empty"></span></div>
+    </section>
+    <section>
+      <h2>待办</h2>
+      <div class="mini"><input id="todoInput" placeholder="新待办"><button id="todoAdd">加</button></div>
+      <div id="todos"></div>
+    </section>
+    <section>
+      <h2>账本</h2>
+      <div class="mini"><input id="expItem" placeholder="项目"><input id="expAmount" class="narrow" placeholder="金额" inputmode="decimal"><button id="expAdd">记</button></div>
+      <div id="expenses"></div>
+    </section>
+    <section>
+      <h2>长期记忆</h2>
+      <div class="mini"><input id="memKey" placeholder="名称"><input id="memValue" placeholder="内容"><button id="memAdd">存</button></div>
+      <div id="memories"></div>
+    </section>
+    <section>
+      <h2>任务</h2>
+      <div class="mini"><input id="taskInput" placeholder="新任务标题"><button id="taskAdd">建</button></div>
+      <div id="tasks"></div>
+    </section>
+  </aside>
+</main>
+<script>
+const $ = (id) => document.getElementById(id);
+let state = { messages: [], todos: [], expenses: [], memories: [], tasks: [], stats: {} };
+
+async function api(action, body) {
+  const res = await fetch("/api/" + action, {
+    method: body ? "POST" : "GET",
+    headers: { "content-type": "application/json" },
+    body: body ? JSON.stringify(body) : undefined,
+  });
+  const data = await res.json();
+  if (data && data.messages) { state = data; render(); }
+  return data;
+}
+function esc(s) { return String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c])); }
+
+function render() {
+  $("messages").innerHTML = state.messages.map((m) =>
+    `<div class="msg ${m.role === "user" ? "user" : "assistant"}">${esc(m.content)}</div>`).join("") ||
+    `<div class="empty">还没有对话，跟我说点什么吧。</div>`;
+  $("messages").scrollTop = $("messages").scrollHeight;
+  $("stats").textContent = `待办未完成 ${state.stats.todoOpen ?? 0} · 支出合计 ${state.stats.expenseTotal ?? 0} 元 · 记忆 ${state.stats.memoryCount ?? 0} 条 · 进行中任务 ${state.stats.taskOpen ?? 0}`;
+  $("todos").innerHTML = state.todos.map((t) =>
+    `<div class="row ${t.done ? "done" : ""}"><input type="checkbox" ${t.done ? "checked" : ""} onchange="toggleTodo(${t.id}, this.checked)"><span class="grow">${esc(t.title)}</span><button class="del" onclick="delTodo(${t.id})">删</button></div>`).join("") ||
+    `<div class="empty">暂无待办</div>`;
+  $("expenses").innerHTML = state.expenses.map((e) =>
+    `<div class="row"><span class="grow">${esc(e.item)}</span><span>${e.amount} 元</span><button class="del" onclick="delExpense(${e.id})">删</button></div>`).join("") ||
+    `<div class="empty">暂无记录</div>`;
+  $("memories").innerHTML = state.memories.map((mm) =>
+    `<div class="row"><span class="grow"><b>${esc(mm.key)}</b>：${esc(mm.value)}</span><button class="del" onclick="delMemory(${mm.id})">删</button></div>`).join("") ||
+    `<div class="empty">暂无记忆</div>`;
+  $("tasks").innerHTML = state.tasks.map((t) =>
+    `<div class="task"><h3><span>${esc(t.title)}${t.status === "done" ? "（已完成）" : ""}</span><button class="del" onclick="delTask(${t.id})">删</button></h3>` +
+    t.steps.map((s) => `<label class="step ${s.done ? "done" : ""}"><input type="checkbox" ${s.done ? "checked" : ""} onchange="toggleStep(${s.id}, this.checked)"><span>${esc(s.title)}</span></label>`).join("") +
+    `</div>`).join("") || `<div class="empty">暂无任务</div>`;
+}
+
+window.toggleTodo = (id, done) => api("toggletodo", { id, done });
+window.delTodo = (id) => api("deletetodo", { id });
+window.delExpense = (id) => api("deleteexpense", { id });
+window.delMemory = (id) => api("deletememory", { id });
+window.delTask = (id) => api("deletetask", { id });
+window.toggleStep = (id, done) => api("toggletaskstep", { id, done });
+
+async function send() {
+  const v = $("input").value.trim();
+  if (!v) return;
+  $("input").value = "";
+  state.messages.push({ role: "user", content: v });
+  render();
+  await api("sendmessage", { content: v });
+}
+$("send").onclick = send;
+$("input").addEventListener("keydown", (e) => { if (e.key === "Enter") send(); });
+$("clear").onclick = () => api("clearchat", {});
+$("todoAdd").onclick = () => { const v = $("todoInput").value.trim(); if (v) { $("todoInput").value = ""; api("addtodo", { title: v }); } };
+$("expAdd").onclick = () => { const item = $("expItem").value.trim(), amount = parseFloat($("expAmount").value); if (item && amount) { $("expItem").value = ""; $("expAmount").value = ""; api("addexpense", { item, amount }); } };
+$("memAdd").onclick = () => { const key = $("memKey").value.trim(), value = $("memValue").value.trim(); if (key && value) { $("memKey").value = ""; $("memValue").value = ""; api("savememory", { key, value }); } };
+$("taskAdd").onclick = () => { const v = $("taskInput").value.trim(); if (v) { $("taskInput").value = ""; api("createtask", { title: v }); } };
+
+const PRESETS = {
+  deepseek: { base: "https://api.deepseek.com", model: "deepseek-chat" },
+  openai: { base: "https://api.openai.com/v1", model: "gpt-4o-mini" },
+  custom: { base: "", model: "" },
+};
+function showSettings(s) {
+  if (s.provider) $("setProvider").value = s.provider;
+  if (s.base_url !== undefined) $("setBase").value = s.base_url;
+  if (s.model !== undefined) $("setModel").value = s.model;
+  $("setStatus").textContent = s.has_key ? `已配置 key（…${s.key_tail}）` : "还没配置 key";
+}
+$("setProvider").onchange = () => {
+  const p = PRESETS[$("setProvider").value];
+  if (p) { $("setBase").value = p.base; $("setModel").value = p.model; }
+};
+$("setSave").onclick = async () => {
+  $("setStatus").textContent = "保存中…";
+  const s = await api("savesettings", {
+    provider: $("setProvider").value,
+    base_url: $("setBase").value.trim(),
+    model: $("setModel").value.trim(),
+    api_key: $("setKey").value.trim(),
+  });
+  $("setKey").value = "";
+  showSettings(s);
+  $("setStatus").textContent = s.has_key ? `已保存，key 尾号 …${s.key_tail}` : "已保存（还没填 key）";
+};
+api("getsettings").then(showSettings);
+
+api("getbootstrap");
+</script>
+</body>
+</html>
