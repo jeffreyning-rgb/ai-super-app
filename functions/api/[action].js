@@ -43,6 +43,7 @@ async function getSettings(db) {
     provider: s.provider || "deepseek",
     base_url: s.base_url || "https://api.deepseek.com",
     model: s.model || "deepseek-chat",
+    protocol: s.protocol || "openai",
     api_key: s.api_key || "",
   };
 }
@@ -54,8 +55,35 @@ async function setSetting(db, key, value) {
     .run();
 }
 
-// 大模型调用（OpenAI 兼容接口：DeepSeek / OpenAI / 通义兼容模式等）
-async function callLLM(db, settings, userText) {
+// 大模型调用：三种协议
+// openai    —— OpenAI 兼容接口（DeepSeek / OpenAI / 通义 / 智谱 / Kimi / 硅基流动 / OpenRouter 等）
+// anthropic —— Claude 原生接口
+// gemini    —— Google Gemini 原生接口
+function mergeTurns(history) {
+  const out = [];
+  for (const m of history) {
+    const last = out[out.length - 1];
+    if (last && last.role === m.role) last.content += "\n" + m.content;
+    else out.push({ role: m.role, content: m.content });
+  }
+  while (out.length && out[0].role !== "user") out.shift();
+  return out;
+}
+
+async function fetchJSON(url, options) {
+  const ctrl = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(), 30000);
+  try {
+    const resp = await fetch(url, { ...options, signal: ctrl.signal });
+    const out = await resp.json().catch(() => ({}));
+    if (!resp.ok) throw new Error((out.error && out.error.message) || `HTTP ${resp.status}`);
+    return out;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+async function callLLM(db, settings) {
   const hist = await db.prepare("SELECT role, content FROM messages ORDER BY id DESC LIMIT 12").all();
   const history = hist.results.reverse().map((m) => ({ role: m.role, content: m.content }));
   const data = await bootstrap(db);
@@ -65,26 +93,37 @@ async function callLLM(db, settings, userText) {
     "你是「AI 超级应用」里的个人助手，用简洁自然的中文回答，不要长篇大论。" +
     `你知道用户的一部分数据：未完成待办：${todoText}。支出合计：${data.stats.expenseTotal} 元。长期记忆：${memText}。` +
     "用户问到这些数据时直接根据上面回答，不要编造没有的数据。";
-  const ctrl = new AbortController();
-  const timer = setTimeout(() => ctrl.abort(), 30000);
-  try {
-    const resp = await fetch(settings.base_url.replace(/\/+$/, "") + "/chat/completions", {
+  const base = settings.base_url.replace(/\/+$/, "");
+  const protocol = settings.protocol || "openai";
+  let text = "";
+  if (protocol === "anthropic") {
+    const out = await fetchJSON(base + "/v1/messages", {
       method: "POST",
-      signal: ctrl.signal,
+      headers: { "content-type": "application/json", "x-api-key": settings.api_key, "anthropic-version": "2023-06-01" },
+      body: JSON.stringify({ model: settings.model, max_tokens: 1024, system, messages: mergeTurns(history) }),
+    });
+    text = (out.content || []).filter((b) => b.type === "text").map((b) => b.text).join("");
+  } else if (protocol === "gemini") {
+    const out = await fetchJSON(`${base}/v1beta/models/${settings.model}:generateContent`, {
+      method: "POST",
+      headers: { "content-type": "application/json", "x-goog-api-key": settings.api_key },
+      body: JSON.stringify({
+        systemInstruction: { parts: [{ text: system }] },
+        contents: mergeTurns(history).map((m) => ({ role: m.role === "assistant" ? "model" : "user", parts: [{ text: m.content }] })),
+      }),
+    });
+    const parts = out.candidates && out.candidates[0] && out.candidates[0].content && out.candidates[0].content.parts;
+    text = (parts || []).map((p) => p.text || "").join("");
+  } else {
+    const out = await fetchJSON(base + "/chat/completions", {
+      method: "POST",
       headers: { "content-type": "application/json", authorization: `Bearer ${settings.api_key}` },
       body: JSON.stringify({ model: settings.model, messages: [{ role: "system", content: system }, ...history], temperature: 0.7 }),
     });
-    const out = await resp.json().catch(() => ({}));
-    if (!resp.ok) {
-      const msg = (out.error && out.error.message) || `HTTP ${resp.status}`;
-      throw new Error(msg);
-    }
-    const text = out.choices && out.choices[0] && out.choices[0].message && out.choices[0].message.content;
-    if (!text) throw new Error("模型没有返回内容");
-    return text.trim();
-  } finally {
-    clearTimeout(timer);
+    text = out.choices && out.choices[0] && out.choices[0].message && out.choices[0].message.content;
   }
+  if (!text) throw new Error("模型没有返回内容");
+  return String(text).trim();
 }
 
 // 规则版意图识别：记账 / 待办 / 记忆 / 任务，其余走大模型（未配置时给提示）
@@ -132,7 +171,7 @@ async function handleChat(db, content) {
     const settings = await getSettings(db);
     if (settings.api_key) {
       try {
-        reply = await callLLM(db, settings, text);
+        reply = await callLLM(db, settings);
       } catch (e) {
         reply = `大模型调用失败：${String(e && e.message || e)}。检查一下模型设置里的 key 和模型名，或者稍后再试。`;
       }
@@ -159,15 +198,16 @@ export async function onRequest(context) {
         return json(await bootstrap(db));
       case "getsettings": {
         const s = await getSettings(db);
-        return json({ provider: s.provider, base_url: s.base_url, model: s.model, has_key: !!s.api_key, key_tail: s.api_key ? s.api_key.slice(-4) : "" });
+        return json({ provider: s.provider, base_url: s.base_url, model: s.model, protocol: s.protocol, has_key: !!s.api_key, key_tail: s.api_key ? s.api_key.slice(-4) : "" });
       }
       case "savesettings": {
         if (body.provider !== undefined) await setSetting(db, "provider", String(body.provider).slice(0, 30));
         if (body.base_url !== undefined) await setSetting(db, "base_url", String(body.base_url).trim().slice(0, 200));
         if (body.model !== undefined) await setSetting(db, "model", String(body.model).trim().slice(0, 60));
+        if (body.protocol !== undefined) await setSetting(db, "protocol", String(body.protocol).slice(0, 20));
         if (body.api_key) await setSetting(db, "api_key", String(body.api_key).trim());
         const s = await getSettings(db);
-        return json({ ok: true, provider: s.provider, base_url: s.base_url, model: s.model, has_key: !!s.api_key, key_tail: s.api_key ? s.api_key.slice(-4) : "" });
+        return json({ ok: true, provider: s.provider, base_url: s.base_url, model: s.model, protocol: s.protocol, has_key: !!s.api_key, key_tail: s.api_key ? s.api_key.slice(-4) : "" });
       }
       case "sendmessage": {
         const reply = await handleChat(db, body.content || "");

@@ -58,10 +58,18 @@
       <div class="mini">
         <select id="setProvider">
           <option value="deepseek">DeepSeek</option>
+          <option value="qwen">通义千问（阿里）</option>
+          <option value="glm">智谱 GLM</option>
+          <option value="kimi">Kimi（月之暗面）</option>
+          <option value="siliconflow">硅基流动</option>
           <option value="openai">OpenAI</option>
+          <option value="claude">Claude（Anthropic）</option>
+          <option value="gemini">Gemini（Google）</option>
+          <option value="openrouter">OpenRouter</option>
           <option value="custom">自定义（OpenAI 兼容）</option>
         </select>
       </div>
+      <div class="empty" id="setHint" style="margin:-2px 0 8px"></div>
       <div class="mini"><input id="setBase" placeholder="接口地址，如 https://api.deepseek.com"></div>
       <div class="mini"><input id="setModel" placeholder="模型名，如 deepseek-chat"></div>
       <div class="mini"><input id="setKey" type="password" placeholder="API key（留空表示不修改）" autocomplete="off"></div>
@@ -150,26 +158,41 @@ $("memAdd").onclick = () => { const key = $("memKey").value.trim(), value = $("m
 $("taskAdd").onclick = () => { const v = $("taskInput").value.trim(); if (v) { $("taskInput").value = ""; api("createtask", { title: v }); } };
 
 const PRESETS = {
-  deepseek: { base: "https://api.deepseek.com", model: "deepseek-chat" },
-  openai: { base: "https://api.openai.com/v1", model: "gpt-4o-mini" },
-  custom: { base: "", model: "" },
+  deepseek: { base: "https://api.deepseek.com", model: "deepseek-chat", protocol: "openai", hint: "key 申请：platform.deepseek.com" },
+  qwen: { base: "https://dashscope.aliyuncs.com/compatible-mode/v1", model: "qwen-plus", protocol: "openai", hint: "key 申请：阿里云百炼控制台 bailian.console.aliyun.com" },
+  glm: { base: "https://open.bigmodel.cn/api/paas/v4", model: "glm-4-flash", protocol: "openai", hint: "key 申请：open.bigmodel.cn" },
+  kimi: { base: "https://api.moonshot.cn/v1", model: "moonshot-v1-8k", protocol: "openai", hint: "key 申请：platform.moonshot.cn" },
+  siliconflow: { base: "https://api.siliconflow.cn/v1", model: "Qwen/Qwen2.5-7B-Instruct", protocol: "openai", hint: "key 申请：cloud.siliconflow.cn" },
+  openai: { base: "https://api.openai.com/v1", model: "gpt-4o-mini", protocol: "openai", hint: "key 申请：platform.openai.com" },
+  claude: { base: "https://api.anthropic.com", model: "claude-sonnet-4-5", protocol: "anthropic", hint: "key 申请：console.anthropic.com" },
+  gemini: { base: "https://generativelanguage.googleapis.com", model: "gemini-2.5-flash", protocol: "gemini", hint: "key 申请：aistudio.google.com" },
+  openrouter: { base: "https://openrouter.ai/api/v1", model: "openai/gpt-4o-mini", protocol: "openai", hint: "key 申请：openrouter.ai，一个 key 用多家模型" },
+  custom: { base: "", model: "", protocol: "openai", hint: "填任意 OpenAI 兼容接口的地址和模型名" },
 };
+function applyPreset() {
+  const p = PRESETS[$("setProvider").value];
+  if (!p) return;
+  $("setBase").value = p.base;
+  $("setModel").value = p.model;
+  $("setHint").textContent = p.hint;
+}
 function showSettings(s) {
   if (s.provider) $("setProvider").value = s.provider;
   if (s.base_url !== undefined) $("setBase").value = s.base_url;
   if (s.model !== undefined) $("setModel").value = s.model;
+  const p = PRESETS[$("setProvider").value];
+  if (p) $("setHint").textContent = p.hint;
   $("setStatus").textContent = s.has_key ? `已配置 key（…${s.key_tail}）` : "还没配置 key";
 }
-$("setProvider").onchange = () => {
-  const p = PRESETS[$("setProvider").value];
-  if (p) { $("setBase").value = p.base; $("setModel").value = p.model; }
-};
+$("setProvider").onchange = applyPreset;
 $("setSave").onclick = async () => {
   $("setStatus").textContent = "保存中…";
+  const p = PRESETS[$("setProvider").value] || {};
   const s = await api("savesettings", {
     provider: $("setProvider").value,
     base_url: $("setBase").value.trim(),
     model: $("setModel").value.trim(),
+    protocol: p.protocol || "openai",
     api_key: $("setKey").value.trim(),
   });
   $("setKey").value = "";
